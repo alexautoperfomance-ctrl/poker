@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover,user-scalable=no">
+<meta name="theme-color" content="#0a1220">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Покер">
+<title>Холдем с друзьями</title>
+<link rel="manifest" href="manifest.json">
+<link rel="icon" href="icons/icon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="icons/icon-180.png">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div id="landing" class="screen hidden"></div>
+<div id="game" class="screen hidden">
+  <header class="top">
+    <button class="ib" id="menuBtn" aria-label="Меню">☰</button>
+    <div class="tinfo"><b id="tCode"></b><span id="tSub"></span></div>
+    <span id="net" class="net"></span>
+    <button class="ib" id="shareBtn" aria-label="Пригласить">⤴</button>
+  </header>
+  <div id="bombInfo" class="bombinfo"></div>
+  <main id="tableWrap">
+    <div id="table">
+      <div class="rail"><div class="felt"><div class="logo">ХОЛДЕМ</div></div></div>
+      <div id="center">
+        <div id="bombBanner" class="hidden">💣 БОМБ-ПОТ</div>
+        <div id="pot"></div>
+        <div id="boards"></div>
+        <div id="hname"></div>
+      </div>
+      <div id="seats"></div>
+      <div id="fx"></div>
+    </div>
+  </main>
+  <footer id="controls"></footer>
+</div>
+<div id="sheet" class="sheet hidden"><div class="sheet-card"><div class="sheet-head"><div id="tabs"></div><button class="ib" id="sheetClose">✕</button></div><div id="sheetBody"></div></div></div>
+<div id="overlay" class="hidden"></div>
+<div id="toast"></div>
+<script src="vendor/peerjs.min.js"></script>
+<script type="module" src="app.js"></script>
+</body>
+</html>
