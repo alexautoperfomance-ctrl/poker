@@ -15,7 +15,7 @@ export function newTable(cfg = {}) {
   return {
     cfg: { sb: 10, bb: 20, straddle: true, bombEvery: 7, bombAnte: 40, timer: 25, pause: 5000, ...cfg },
     seats: Array(9).fill(null), players: {}, handNo: 0, button: -1, hand: null,
-    history: [], requests: [], started: false, rig: null, adminPid: null,
+    history: [], requests: [], ledger: [], invites: [], started: false, rig: null, adminPid: null, pinHash: null,
   };
 }
 
@@ -24,7 +24,7 @@ const P = (t, s) => t.players[t.hand.pid[s]];
 const inLiveHand = (t, p) => { const h = t.hand; return h && !h.result && p.seat != null && h.seats.includes(p.seat) && h.pid[p.seat] && !h.folded.includes(p.seat); };
 
 export function addPlayer(t, pid, name, token) {
-  if (!t.players[pid]) t.players[pid] = { name, token, stack: 0, pending: 0, seat: null, sitOut: false, straddle: false, connected: true };
+  if (!t.players[pid]) t.players[pid] = { name, token, stack: 0, pending: 0, seat: null, sitOut: false, straddle: false, connected: true, status: 'pending' };
   else if (name) t.players[pid].name = name;
   return t.players[pid];
 }
@@ -38,9 +38,14 @@ export function setCfg(t, c) {
   if (c.timer != null) k.timer = Math.max(5, Math.min(120, c.timer | 0));
 }
 
-export function adjust(t, pid, delta) {
+// Банк админа безлимитный (∞): фишки создаются/изымаются, каждая операция пишется в журнал
+export function adjust(t, pid, delta, reason = 'выдача', now = Date.now()) {
   const p = t.players[pid]; if (!p) return 'Нет игрока';
-  delta = Math.trunc(delta);
+  delta = Math.trunc(delta); if (!delta) return;
+  if (delta < 0) delta = -Math.min(-delta, p.stack + Math.max(0, p.pending)); // нельзя забрать больше, чем есть
+  if (!delta) return 'У игрока нет фишек';
+  (t.ledger ||= []).unshift({ at: now, pid, name: p.name, delta, reason });
+  t.ledger.length = Math.min(t.ledger.length, 500);
   if (inLiveHand(t, p)) { p.pending += delta; return; } // применится после раздачи
   p.stack = Math.max(0, p.stack + delta);
 }
@@ -50,6 +55,7 @@ function applyPending(t) {
 
 export function sit(t, pid, seat) {
   const p = t.players[pid];
+  if (p && p.status && p.status !== 'ok') return 'Хост ещё не одобрил вас';
   if (!p || seat < 0 || seat > 8 || t.seats[seat]) return 'Место занято';
   if (p.seat != null) return 'Вы уже за столом';
   if (t.hand && !t.hand.result && t.hand.seats.includes(seat)) return 'Дождитесь конца раздачи';
@@ -278,9 +284,11 @@ export function view(t, pid, now) {
   return {
     now, cfg: t.cfg, seats, hand, my, handNo: t.handNo, button: t.button, started: t.started,
     untilBomb: k > 0 ? (Math.ceil((t.handNo + 1) / k) * k - t.handNo) : null,
-    me: me ? { pid, name: me.name, seat: me.seat, stack: me.stack, pending: me.pending, sitOut: me.sitOut, straddle: me.straddle } : null,
+    me: me ? { pid, name: me.name, seat: me.seat, stack: me.stack, pending: me.pending, sitOut: me.sitOut, straddle: me.straddle, status: me.status || 'ok' } : null,
+    ledger: pid === t.adminPid ? (t.ledger || []).slice(0, 100) : (t.ledger || []).filter(l => l.pid === pid).slice(0, 30),
+    invites: pid === t.adminPid ? t.invites || [] : null,
     admin: pid === t.adminPid,
-    players: pid === t.adminPid ? Object.entries(t.players).map(([id, p]) => ({ pid: id, name: p.name, stack: p.stack, pending: p.pending, seat: p.seat, connected: p.connected })) : null,
+    players: pid === t.adminPid ? Object.entries(t.players).map(([id, p]) => ({ pid: id, name: p.name, stack: p.stack, pending: p.pending, seat: p.seat, connected: p.connected, status: p.status || 'ok' })) : null,
     requests: pid === t.adminPid ? t.requests.map(r => ({ ...r, name: t.players[r.pid]?.name })) : t.requests.filter(r => r.pid === pid),
     history: t.history,
   };

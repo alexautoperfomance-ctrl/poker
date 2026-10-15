@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { best, eval5 } from '../eval.js';
-import { computePots, distribute, newTable, addPlayer, sit, startHand, act } from '../engine.js';
+import { computePots, distribute, newTable, addPlayer, sit, startHand, act, adjust } from '../engine.js';
 
 const B = s => best(s.split(' '));
 const cmp = (a, b) => Math.sign(B(a).score - B(b).score);
@@ -67,7 +67,7 @@ test('двойная доска с сайд-потами', () => {
 
 function table(n, stack = 1000) {
   const t = newTable({ pause: 0 });
-  for (let i = 0; i < n; i++) { addPlayer(t, 'p' + i, 'P' + i); t.players['p' + i].stack = stack; sit(t, 'p' + i, i); }
+  for (let i = 0; i < n; i++) { addPlayer(t, 'p' + i, 'P' + i).status = 'ok'; t.players['p' + i].stack = stack; sit(t, 'p' + i, i); }
   return t;
 }
 const deck = s => { const fixed = s.split(' '); const rest = []; for (const r of '23456789TJQKA') for (const x of 'shdc') if (!fixed.includes(r + x)) rest.push(r + x); return fixed.concat(rest); };
@@ -120,4 +120,12 @@ test('короткий олл-ин не переоткрывает торги', 
   act(t, 'p0', { type: 'allin' }, 0); // до 130: инкремент 30 < 80
   assert.equal(t.hand.toAct, 1);
   assert.match(act(t, 'p1', { type: 'raise', amount: 400 }, 0), /Рейз/);
+});
+
+test('журнал фишек: выдача и изъятие, нельзя забрать больше стека', () => {
+  const t = newTable(); addPlayer(t, 'a', 'A');
+  adjust(t, 'a', 500, 'выдача', 1); adjust(t, 'a', -800, 'изъятие', 2);
+  assert.equal(t.players.a.stack, 0);
+  assert.deepEqual(t.ledger.map(l => l.delta), [-500, 500]);
+  assert.equal(sit(t, 'a', 0), 'Хост ещё не одобрил вас');
 });

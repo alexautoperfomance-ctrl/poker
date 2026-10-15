@@ -10,7 +10,7 @@ const fmt = n => (n ?? 0).toLocaleString('ru-RU');
 const plural = (n, a, b, c) => { const m = n % 10, h = n % 100; return m === 1 && h !== 11 ? a : m >= 2 && m <= 4 && (h < 10 || h >= 20) ? b : c; };
 const STREET = { preflop: 'Префлоп', flop: 'Флоп', turn: 'Тёрн', river: 'Ривер', showdown: 'Вскрытие' };
 const SUIT = { s: '♠', h: '♥', d: '♦', c: '♣' };
-if (TEST) { window.__msgs = []; window.__V = () => V; window.__peer = () => peer; }
+if (TEST) { window.__msgs = []; window.__V = () => V; window.__peer = () => peer; window.__send = d => send(d); }
 
 let code = (location.hash.match(/t=([A-Z0-9]{4,8})/i) || [])[1]?.toUpperCase();
 let role = null, T = null, myPid = null, peer = null, hostConn = null, V = null, PV = null, clockOff = 0;
@@ -51,12 +51,14 @@ function landing() {
     <div class="row"><div><label class="l">Ваш стек</label><input id="stack" type="number" value="2000"></div><div><label class="l">Таймер хода, с</label><input id="timer" type="number" value="25"></div></div>
     <div class="row"><div><label class="l">Бомб-пот каждые N рук</label><input id="bombEvery" type="number" value="7"></div><div><label class="l">Анте бомб-пота</label><input id="bombAnte" type="number" placeholder="2×ББ"></div></div>
     <label class="chk"><input type="checkbox" id="straddle" checked> Разрешить стрэддл (UTG, 2×ББ)</label>
+    <label class="l">PIN админа (4–8 цифр) — понадобится, чтобы снова открыть стол как хост</label><input id="pin" type="password" inputmode="numeric" maxlength="8" placeholder="••••" autocomplete="new-password">
     <button class="btn" id="createBtn">Создать стол</button></div>
   <div class="panel"><h2>Войти по коду</h2><div class="row"><input id="codeIn" placeholder="Код стола" maxlength="8" style="text-transform:uppercase"><button class="btn sm sec" id="goBtn" style="flex:none">Войти</button></div></div>
   ${mine.length ? `<div class="panel mytables"><h2>Мои столы (я хост)</h2>${mine.map(c => `<a href="#t=${c}">Стол ${c} — продолжить</a>`).join('')}</div>` : ''}`;
   $('#goBtn').onclick = () => { const c = $('#codeIn').value.trim().toUpperCase(); if (c) location.hash = 't=' + c; };
-  $('#createBtn').onclick = () => {
+  $('#createBtn').onclick = async () => {
     const n = $('#nick').value.trim(); if (!n) return toast('Введите ник');
+    const pin = $('#pin').value.trim(); if (!/^\d{4,8}$/.test(pin)) return toast('PIN: от 4 до 8 цифр');
     localStorage.pk_name = n;
     code = rid(5);
     const t = E.newTable(TEST ? { pause: 1800 } : {});
@@ -64,8 +66,9 @@ function landing() {
     E.setCfg(t, { blinds: bi, straddle: $('#straddle').checked, bombEvery: +$('#bombEvery').value, timer: +$('#timer').value });
     if (+$('#bombAnte').value > 0) E.setCfg(t, { bombAnte: +$('#bombAnte').value });
     const pid = rid(8);
-    E.addPlayer(t, pid, n, rid(12)); t.adminPid = pid; t.players[pid].stack = Math.max(0, +$('#stack').value | 0);
-    t.code = code;
+    E.addPlayer(t, pid, n, rid(12)); t.adminPid = pid; E.adjust(t, pid, Math.max(0, +$('#stack').value | 0), 'стартовый стек хоста');
+    t.code = code; t.players[pid].status = 'ok';
+    t.pinHash = await pinHash(code, pin); sessionStorage['pku_' + code] = t.pinHash;
     localStorage['pkh_' + code] = JSON.stringify(t);
     history.replaceState(null, '', '#t=' + code);
     startHost();
@@ -73,6 +76,25 @@ function landing() {
 }
 
 /* ---------- хост ---------- */
+async function pinHash(c, pin) { const b = await crypto.subtle.digest('SHA-256', new TextEncoder().encode('poker:' + c + ':' + pin)); return [...new Uint8Array(b)].map(x => x.toString(16).padStart(2, '0')).join(''); }
+// Вход хоста: на этом устройстве стол открывается только после ввода PIN (на вкладку запоминается до закрытия)
+function hostGate() {
+  const t = JSON.parse(localStorage['pkh_' + code]);
+  if (t.pinHash && sessionStorage['pku_' + code] === t.pinHash) return startHost();
+  $('#game').classList.add('hidden');
+  const L = $('#landing'); L.classList.remove('hidden');
+  L.innerHTML = `<div class="brand"><h1>Стол ${esc(code)}</h1><p>${t.pinHash ? 'Введите PIN админа' : 'Задайте PIN админа для этого стола'}</p></div>
+    <div class="panel"><input id="pinIn" type="password" inputmode="numeric" maxlength="8" placeholder="PIN" autocomplete="off"><div style="height:12px"></div>
+    <button class="btn" id="pinBtn">Открыть как хост</button><div style="height:10px"></div><button class="btn sec" id="pinBack">На главную</button></div>`;
+  $('#pinBack').onclick = () => { location.hash = ''; };
+  $('#pinBtn').onclick = async () => {
+    const pin = $('#pinIn').value.trim(); if (!/^\d{4,8}$/.test(pin)) return toast('PIN: от 4 до 8 цифр');
+    const hsh = await pinHash(code, pin);
+    if (!t.pinHash) { t.pinHash = hsh; localStorage['pkh_' + code] = JSON.stringify(t); }
+    else if (hsh !== t.pinHash) { await new Promise(r => setTimeout(r, 800)); return toast('Неверный PIN'); }
+    sessionStorage['pku_' + code] = hsh; startHost();
+  };
+}
 function persist() { try { localStorage['pkh_' + code] = JSON.stringify(T); } catch (e) { } }
 function changed() {
   persist();
@@ -91,6 +113,7 @@ function startHost() {
   showGame();
   makeHostPeer();
   setInterval(() => { if (E.tick(T, Date.now())) changed(); }, 250);
+  setInterval(() => { for (const c of Object.values(conns)) if (c.open) try { c.send({ t: 'ping' }); } catch (e) { } }, 3000);
   changed();
 }
 function makeHostPeer() {
@@ -111,8 +134,13 @@ function onHostMsg(c, d) {
   if (!d || typeof d !== 'object') return;
   if (d.t === 'hello') {
     let pid = d.pid, p = pid && T.players[pid];
-    if (!p || p.token !== d.token || pid === T.adminPid) { pid = rid(8); p = E.addPlayer(T, pid, String(d.name || 'Игрок').slice(0, 16), rid(12)); }
+    if (!p || p.token !== d.token || pid === T.adminPid) {
+      pid = rid(8); p = E.addPlayer(T, pid, String(d.name || 'Игрок').slice(0, 16), rid(12));
+      const inv = (T.invites ||= []).find(i => i.name.toLowerCase() === p.name.toLowerCase());
+      if (inv) { p.status = 'ok'; T.invites = T.invites.filter(i => i !== inv); if (inv.chips > 0) E.adjust(T, pid, inv.chips, 'приглашение'); }
+    }
     else if (d.name) p.name = String(d.name).slice(0, 16);
+    if (p.status === 'kicked') { c.send({ t: 'kicked' }); setTimeout(() => c.close(), 500); return; }
     p.connected = true; c.pid = pid;
     if (conns[pid] && conns[pid] !== c) try { conns[pid].close(); } catch (e) { }
     conns[pid] = c;
@@ -132,21 +160,29 @@ function handle(pid, d) {
     case 'act': return E.act(T, pid, d.a || {}, now);
     case 'sitout': p.sitOut = !!d.v; return;
     case 'straddle': p.straddle = !!d.v; return;
-    case 'req': { const a = Math.max(1, Math.min(1e7, d.amount | 0)); T.requests = T.requests.filter(r => r.pid !== pid); T.requests.push({ id: rid(6), pid, amount: a }); return; }
+    case 'req': { if (p.status !== 'ok' && pid !== T.adminPid) return 'Сначала хост должен вас одобрить'; const a = Math.max(1, Math.min(1e7, d.amount | 0)); T.requests = T.requests.filter(r => r.pid !== pid); T.requests.push({ id: rid(6), pid, amount: a }); return; }
   }
   if (pid !== T.adminPid) return 'Только для хоста';
   switch (d.t) {
     case 'start': T.started = true; return;
     case 'pause': T.started = false; return;
-    case 'chips': return E.adjust(T, d.pid, d.delta);
-    case 'approve': case 'deny': { const r = T.requests.find(x => x.id === d.id); if (!r) return; T.requests = T.requests.filter(x => x !== r); if (d.t === 'approve') E.adjust(T, r.pid, r.amount); return; }
+    case 'chips': return E.adjust(T, d.pid, d.delta, d.delta > 0 ? 'выдача' : 'изъятие');
+    case 'approve': case 'deny': { const r = T.requests.find(x => x.id === d.id); if (!r) return; T.requests = T.requests.filter(x => x !== r); if (d.t === 'approve') E.adjust(T, r.pid, r.amount, 'по запросу'); return; }
+    case 'admit': { const q = T.players[d.pid]; if (q) q.status = 'ok'; return; }
+    case 'reject': { const q = T.players[d.pid]; if (q && q.status === 'pending') { q.status = 'kicked'; conns[d.pid]?.send({ t: 'kicked' }); } return; }
+    case 'unban': { const q = T.players[d.pid]; if (q) q.status = 'ok'; return; }
+    case 'invite': { const n = String(d.name || '').trim().slice(0, 16); if (!n) return 'Введите ник'; (T.invites ||= []).push({ name: n, chips: Math.max(0, d.chips | 0) }); return; }
+    case 'uninvite': T.invites = (T.invites || []).filter(i => i.name !== d.name); return;
     case 'cfg': E.setCfg(T, d.cfg || {}); return;
-    case 'kick': E.stand(T, d.pid, now); return;
+    case 'kick': { if (d.pid === T.adminPid) return; E.stand(T, d.pid, now); const q = T.players[d.pid]; if (q) q.status = 'kicked'; T.requests = T.requests.filter(r => r.pid !== d.pid);
+      const kc = conns[d.pid]; if (kc) { try { kc.send({ t: 'kicked' }); } catch (e) { } setTimeout(() => kc.close(), 500); } return; }
   }
 }
 
 /* ---------- клиент ---------- */
-let ident = {}, connTimer = null, gotView = false;
+let ident = {}, connTimer = null, gotView = false, kicked = false, lastMsg = 0;
+// сторож: если хост молчит дольше 9 с (пинг раз в 3 с) — переподключаемся
+setInterval(() => { if (role === 'client' && hostConn && hostConn.open && lastMsg && Date.now() - lastMsg > 9000) { lastMsg = 0; hostDown(); connect(); } }, 2000);
 function startClient(name) {
   role = 'client';
   ident = JSON.parse(localStorage['pkc_' + code] || '{}'); ident.name = name;
@@ -156,8 +192,8 @@ function startClient(name) {
   peer.on('error', e => { if (e.type === 'peer-unavailable') { hostDown(); retry(3000); } });
   peer.on('disconnected', () => setTimeout(() => { if (!peer.destroyed) peer.reconnect(); }, 1500));
 }
-function retry(ms) { clearTimeout(connTimer); connTimer = setTimeout(connect, ms); }
-function hostDown() {
+function retry(ms) { if (kicked) return; clearTimeout(connTimer); connTimer = setTimeout(connect, ms); }
+function hostDown() { if (kicked) return;
   setNet(false, 'хост офлайн');
   overlay(`<div><div class="spin"></div><b>Хост не в сети</b><p class="mut">Игра сохранена у хоста и продолжится, как только он снова откроет стол. Переподключаемся автоматически…</p><button class="btn sec sm" onclick="location.hash='';location.reload()">На главную</button></div>`);
 }
@@ -166,12 +202,15 @@ function connect() {
   if (hostConn) try { hostConn.close(); } catch (e) { }
   const c = hostConn = peer.connect(PREFIX + code, { reliable: true });
   retry(8000); // если не открылось — пробуем снова
-  c.on('open', () => { clearTimeout(connTimer); c.send({ t: 'hello', pid: ident.pid, token: ident.token, name: ident.name }); setNet(true, '● онлайн'); });
+  c.on('open', () => { clearTimeout(connTimer); lastMsg = Date.now(); c.send({ t: 'hello', pid: ident.pid, token: ident.token, name: ident.name }); setNet(true, '● онлайн'); });
   c.on('data', d => {
+    lastMsg = Date.now();
+    if (d.t === 'ping') return;
     if (TEST) window.__msgs.push(JSON.parse(JSON.stringify(d)));
     if (d.t === 'welcome') { ident.pid = d.pid; ident.token = d.token; myPid = d.pid; localStorage['pkc_' + code] = JSON.stringify(ident); }
-    else if (d.t === 'view') { gotView = true; overlay(null); V = d.v; clockOff = V.now - Date.now(); render(); }
+    else if (d.t === 'view') { if (kicked) return; gotView = true; overlay(null); V = d.v; clockOff = V.now - Date.now(); render(); }
     else if (d.t === 'err') toast(d.msg);
+    else if (d.t === 'kicked') { kicked = true; clearTimeout(connTimer); overlay(`<div><b>Хост убрал вас со стола</b><p class="mut">Ваш баланс сохранён у хоста.</p><button class="btn sec sm" onclick="location.hash='';location.reload()">На главную</button></div>`); }
   });
   c.on('close', () => { if (c !== hostConn) return; hostDown(); retry(2000); });
 }
@@ -223,7 +262,7 @@ function render() {
   v.seats.forEach((st, s) => {
     const p = seatPos(s);
     if (!st) {
-      const canSit = v.me && v.me.seat == null;
+      const canSit = v.me && v.me.seat == null && v.me.status === 'ok';
       html += `<div class="seat empty" style="left:${p.x}%;top:${p.y}%" ${canSit ? `data-sit="${s}"` : ''}><div class="av"><div class="face">${canSit ? 'Сесть' : ''}</div></div></div>`;
       return;
     }
@@ -349,7 +388,8 @@ function renderControls() {
   C.dataset.key = '';
   const me = v.me, seated = me.seat != null;
   let msg;
-  if (!seated) msg = 'Нажмите «Сесть» на свободном месте';
+  if (me.status === 'pending') msg = '⏳ Ждём, пока хост одобрит вас';
+  else if (!seated) msg = 'Нажмите «Сесть» на свободном месте';
   else if (me.stack <= 0 && !(h && v.seats[me.seat]?.inHand)) msg = 'Нет фишек — запросите их у хоста (меню → Фишки)';
   else if (!v.started) msg = v.admin ? 'Нажмите «Начать игру», когда все сядут' : 'Ждём, пока хост начнёт игру';
   else if (h && h.toAct != null) msg = `Ходит ${esc(v.seats[h.toAct]?.name || '')}`;
@@ -392,19 +432,32 @@ function renderSheet() {
     B.innerHTML = `<p>Ваш стек: <b style="color:var(--gold)">${fmt(v.me.stack)}</b>${v.me.pending ? ` <span class="mut">(+${fmt(v.me.pending)} после раздачи)</span>` : ''}</p>
       <p class="mut">Фишки виртуальные и выдаются хостом вручную.</p>
       <label class="l">Сколько попросить</label><div class="row"><input id="reqAmt" type="number" value="${v.cfg.bb * 100}"><button class="btn sm" id="reqBtn" style="flex:none">Запросить</button></div>
+      ${ledgerHTML(v.ledger, false)}
       ${v.requests.length && !v.admin ? `<p class="mut">Запрос отправлен: ${fmt(v.requests[0].amount)}. Ждём хоста.</p>` : ''}`;
     $('#reqBtn').onclick = () => { send({ t: 'req', amount: +$('#reqAmt').value }); toast('Запрос отправлен хосту'); };
   } else if (tab === 'admin') {
     const c = v.cfg, bi = E.BLINDS.findIndex(b => b[1] === c.bb);
-    B.innerHTML = `${v.requests.map(r => `<div class="li" data-req="${r.id}"><div class="grow">🙋 <b>${esc(r.name)}</b> просит ${fmt(r.amount)}</div><button class="btn sm" data-ok>Выдать</button><button class="btn sm sec" data-no>Отклонить</button></div>`).join('')}
+    const pend = v.players.filter(p => p.status === 'pending'), banned = v.players.filter(p => p.status === 'kicked');
+    B.innerHTML = `<div class="li"><div class="grow">🏦 Банк хоста</div><b style="font-size:24px;color:var(--gold)" id="bank">∞</b></div>
+      ${pend.map(p => `<div class="li" data-pend="${p.pid}"><div class="grow">🆕 <b>${esc(p.name)}</b> хочет за стол</div><button class="btn sm" data-admit>Пустить</button><button class="btn sm sec" data-reject>Отказать</button></div>`).join('')}
+      ${v.requests.map(r => `<div class="li" data-req="${r.id}"><div class="grow">🙋 <b>${esc(r.name)}</b> просит ${fmt(r.amount)}</div><button class="btn sm" data-ok>Выдать</button><button class="btn sm sec" data-no>Отклонить</button></div>`).join('')}
       <div class="row"><button class="btn sm ${v.started ? 'sec' : ''}" id="startBtn">${v.started ? '⏸ Пауза после раздачи' : '▶ Начать игру'}</button></div>
-      <h3>Игроки</h3>${v.players.map(p => `<div class="li" data-pid="${p.pid}"><div class="grow"><b>${esc(p.name)}</b> ${p.connected ? '🟢' : '⚪'}<br><span class="mut">${fmt(p.stack)}${p.pending ? ' (' + (p.pending > 0 ? '+' : '') + fmt(p.pending) + ' ждёт)' : ''} · ${p.seat != null ? 'место ' + (p.seat + 1) : 'не за столом'}</span></div>
-        <input type="number" value="1000" class="camt"><button class="btn sm" data-add>+</button><button class="btn sm sec" data-sub>−</button>${p.pid !== myPid && p.seat != null ? '<button class="btn sm sec" data-kick>Поднять</button>' : ''}</div>`).join('')}
+      <h3>Добавить игрока</h3><p class="mut">Игрок с этим ником войдёт по ссылке без одобрения и сразу получит фишки.</p>
+      <div class="row"><input id="invName" placeholder="Ник" maxlength="16"><input id="invChips" type="number" value="2000" style="max-width:110px"><button class="btn sm" id="invBtn" style="flex:none">Добавить</button></div>
+      ${v.invites.map(i => `<div class="li"><div class="grow">✉️ ${esc(i.name)} · ${fmt(i.chips)}</div><button class="btn sm sec" data-uninv="${esc(i.name)}">✕</button></div>`).join('')}
+      <h3>Игроки</h3>${v.players.filter(p => p.status === 'ok').map(p => `<div class="li" data-pid="${p.pid}"><div class="grow"><b>${esc(p.name)}</b> ${p.connected ? '🟢' : '⚪'}<br><span class="mut">${fmt(p.stack)}${p.pending ? ' (' + (p.pending > 0 ? '+' : '') + fmt(p.pending) + ' ждёт)' : ''} · ${p.seat != null ? 'место ' + (p.seat + 1) : 'не за столом'}</span></div>
+        <input type="number" value="1000" class="camt"><button class="btn sm" data-add>+</button><button class="btn sm sec" data-sub>−</button>${p.pid !== myPid ? '<button class="btn sm sec" data-kick>Выгнать</button>' : ''}</div>`).join('')}
+      ${banned.length ? `<h3>Удалённые</h3>${banned.map(p => `<div class="li"><div class="grow">${esc(p.name)} <span class="mut">${fmt(p.stack)}</span></div><button class="btn sm sec" data-unban="${p.pid}">Вернуть</button></div>`).join('')}` : ''}
       <h3>Настройки стола</h3>
       <label class="l">Блайнды</label><select id="cBl">${E.BLINDS.map((b, i) => `<option value="${i}" ${i === bi ? 'selected' : ''}>${b[0]} / ${b[1]}</option>`).join('')}</select>
       <label class="chk"><input type="checkbox" id="cSt" ${c.straddle ? 'checked' : ''}> Стрэддл разрешён</label>
       <div class="row"><div><label class="l">Бомб-пот каждые</label><input id="cBe" type="number" value="${c.bombEvery}"></div><div><label class="l">Анте бомб-пота</label><input id="cBa" type="number" value="${c.bombAnte}"></div><div><label class="l">Таймер, с</label><input id="cTm" type="number" value="${c.timer}"></div></div>
-      <button class="btn sec" id="cSave">Сохранить (с следующей раздачи)</button>`;
+      <button class="btn sec" id="cSave">Сохранить (с следующей раздачи)</button>
+      <h3>Журнал фишек</h3>${ledgerHTML(v.ledger, true)}`;
+    B.querySelectorAll('[data-pend]').forEach(el => { el.querySelector('[data-admit]').onclick = () => send({ t: 'admit', pid: el.dataset.pend }); el.querySelector('[data-reject]').onclick = () => send({ t: 'reject', pid: el.dataset.pend }); });
+    B.querySelectorAll('[data-unban]').forEach(el => el.onclick = () => send({ t: 'unban', pid: el.dataset.unban }));
+    B.querySelectorAll('[data-uninv]').forEach(el => el.onclick = () => send({ t: 'uninvite', name: el.dataset.uninv }));
+    $('#invBtn').onclick = () => send({ t: 'invite', name: $('#invName').value, chips: +$('#invChips').value });
     B.querySelectorAll('[data-req]').forEach(el => { el.querySelector('[data-ok]').onclick = () => send({ t: 'approve', id: el.dataset.req }); el.querySelector('[data-no]').onclick = () => send({ t: 'deny', id: el.dataset.req }); });
     B.querySelectorAll('[data-pid]').forEach(el => {
       const amt = () => Math.abs(+el.querySelector('.camt').value || 0);
@@ -427,9 +480,13 @@ function renderSheet() {
   void focusVal;
 }
 
+function ledgerHTML(L, all) {
+  if (!L || !L.length) return '<p class="mut">Операций с фишками пока нет.</p>';
+  return `<div class="ledger">${L.map(l => `<div class="pl" style="font-size:13px;padding:4px 0;border-bottom:1px solid #ffffff0d"><span class="mut">${new Date(l.at).toLocaleString('ru-RU', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' })}</span>${all ? `<span>${esc(l.name)}</span>` : ''}<span class="mut">${esc(l.reason)}</span><b class="${l.delta > 0 ? 'pos' : 'neg'}">${l.delta > 0 ? '+' : ''}${fmt(l.delta)}</b></div>`).join('')}</div>`;
+}
 /* ---------- запуск ---------- */
 addEventListener('hashchange', () => location.reload());
 if ('serviceWorker' in navigator && !TEST) navigator.serviceWorker.register('sw.js').catch(() => { });
-if (code && localStorage['pkh_' + code]) startHost();
+if (code && localStorage['pkh_' + code]) hostGate();
 else if (code && localStorage['pkc_' + code] && localStorage.pk_name) startClient(localStorage.pk_name);
 else landing();

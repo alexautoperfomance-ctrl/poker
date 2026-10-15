@@ -21,27 +21,50 @@ with sync_playwright() as p:
         return pg
     host = mk(); pages.append(host)
     host.goto(URL + '?test=1')
-    host.fill('#nick', NAMES[0]); host.click('#createBtn')
+    host.fill('#nick', NAMES[0]); host.fill('#pin', '4321'); host.click('#createBtn')
     host.wait_for_selector('#net:has-text("онлайн")', timeout=20000)
     code = host.evaluate('__T().code'); print('code', code)
     host.click('[data-sit="0"]')
+    # админ заранее добавляет Мишу с фишками
+    host.click('#menuBtn'); host.click('[data-tab="admin"]')
+    ok(host.inner_text('#bank') == '∞', 'банк хоста показан как ∞')
+    host.fill('#invName', 'Миша'); host.fill('#invChips', '2000'); host.click('#invBtn'); host.click('#sheetClose')
     for i in (1, 2, 3):
         pg = mk(); pages.append(pg)
         pg.goto(URL + '?test=1#t=' + code)
         pg.fill('#nick', NAMES[i]); pg.click('#joinBtn')
         pg.wait_for_function('window.__V && __V()', timeout=30000)
+        if i == 1:
+            ok(pg.evaluate('__V().me.status') == 'ok', 'приглашённый игрок вошёл без одобрения'); continue
+        ok(pg.evaluate('__V().me.status') == 'pending' and not pg.query_selector('[data-sit]'), f'{NAMES[i]} ждёт одобрения и не может сесть')
+        host.click('#menuBtn'); host.click('[data-tab="admin"]'); host.click('[data-pend] [data-admit]'); host.click('#sheetClose')
+        pg.wait_for_function('__V().me.status === "ok"')
         pg.click(f'[data-sit="{i}"]')
         pg.wait_for_function(f'__V().me.seat === {i}')
         # запрос фишек через UI
         pg.click('[data-x="chips"]'); pg.fill('#reqAmt', '2000'); pg.click('#reqBtn'); pg.click('#sheetClose')
-    host.wait_for_function('__T().requests.length === 3')
+    pages[1].click('[data-sit="1"]'); pages[1].wait_for_function('__V().me.seat === 1')
+    host.wait_for_function('__T().requests.length === 2')
     host.click('#menuBtn'); host.click('[data-tab="admin"]')
-    for _ in range(3):
+    for _ in range(2):
         host.click('[data-req] [data-ok]'); time.sleep(0.2)
     host.click('#sheetClose')
     ok(host.evaluate('Object.values(__T().players).every(p => p.stack === 2000)'), 'админ выдал фишки по запросам')
-
     T = lambda js: host.evaluate(js)
+    # друг не может выполнять админ-действия
+    pages[2].evaluate('__send({t:"chips", pid: __V().me.pid, delta: 99999})'); pages[2].evaluate('__send({t:"start"})'); time.sleep(1)
+    ok(T('__T().players[__T().seats[2]].stack') == 2000 and not T('__T().started'), 'друг не может выдать себе фишки или управлять столом')
+    # изъятие фишек и журнал
+    host.click('#menuBtn'); host.click('[data-tab="admin"]')
+    pid3 = T('__T().seats[3]')
+    host.fill(f'[data-pid="{pid3}"] .camt', '500'); host.click(f'[data-pid="{pid3}"] [data-sub]'); time.sleep(0.3)
+    host.fill(f'[data-pid="{pid3}"] .camt', '500'); host.click(f'[data-pid="{pid3}"] [data-add]'); time.sleep(0.3)
+    led = T('__T().ledger.map(l=>l.reason+":"+l.delta)')
+    ok(len(led) == 6 and 'изъятие:-500' in led and 'приглашение:2000' in led, f'журнал фишек: {led}')
+    ok('изъятие' in host.inner_text('#sheetBody'), 'журнал виден в админке')
+    host.click('#sheetClose')
+    ok('изъятие' in (pages[3].click('[data-x="chips"]') or pages[3].inner_text('#sheetBody')), 'игрок видит свои операции'); pages[3].click('#sheetClose')
+
     def setup(stacks=None, rig=None, handNo=None):
         T('__T().started=false')
         host.wait_for_function('!__T().hand', timeout=20000)
@@ -130,11 +153,26 @@ with sync_playwright() as p:
     ok(pages[1].evaluate('__V().untilBomb') >= 1, 'счётчик до бомб-пота')
 
     # перезапуск хоста: состояние из localStorage, клиенты переподключаются
-    T('__T().started=false')
-    host.reload(); host.wait_for_selector('#net:has-text("онлайн")', timeout=30000)
+    T('__T().started=false'); host.wait_for_function('!__T().hand', timeout=20000)
+    before = T('Object.values(__T().players).map(p=>p.name+":"+p.stack).sort()')
+    hctx = host.context; host.close(); time.sleep(2)
+    host = hctx.new_page(); host.on('pageerror', lambda e: errors.append('pageerror: ' + str(e)))
+    host.goto(URL + '?test=1#t=' + code)
+    host.fill('#pinIn', '1111'); host.click('#pinBtn'); time.sleep(1.2)
+    ok(host.query_selector('#pinIn') is not None, 'неверный PIN не пускает в хост')
+    host.fill('#pinIn', '4321'); host.click('#pinBtn')
+    host.wait_for_selector('#net:has-text("онлайн")', timeout=30000)
+    T = lambda js: host.evaluate(js)
     pages[3].wait_for_function('__V() && !document.querySelector("#overlay:not(.hidden)")', timeout=40000)
     host.wait_for_function('Object.values(__T().players).filter(p=>p.connected).length === 4', timeout=40000)
-    ok(T('__T().handNo') == 7, 'хост восстановил стол после перезагрузки, все клиенты вернулись')
+    ok(T('__T().handNo') >= 7, 'хост восстановил стол после перезагрузки, все клиенты вернулись')
+    ok(T('Object.values(__T().players).map(p=>p.name+":"+p.stack).sort()') == before, f'балансы сохранились {before}')
+    # выгнать Диму
+    host.click('#menuBtn'); host.click('[data-tab="admin"]')
+    pid3 = T('__T().seats[3]'); host.click(f'[data-pid="{pid3}"] [data-kick]'); host.click('#sheetClose')
+    pages[3].wait_for_selector('#overlay:has-text("убрал")', timeout=10000)
+    pages[3].reload(); pages[3].wait_for_selector('#overlay:has-text("убрал")', timeout=30000)
+    ok(T(f'__T().players["{pid3}"].status') == 'kicked' and T('__T().seats[3]') is None, 'игрок выгнан и не может вернуться')
 
     host.click('#menuBtn'); time.sleep(0.5); host.screenshot(path=f'{SHOTS}/history-440.png'); host.click('#sheetClose')
     br.close()
