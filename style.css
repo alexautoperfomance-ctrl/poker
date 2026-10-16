@@ -140,3 +140,4 @@ label.l{display:block;color:var(--mut);font-size:13px;margin:10px 0 6px}
 #toast{position:fixed;left:50%;top:70px;transform:translateX(-50%);background:#1b2c48;padding:10px 16px;border-radius:12px;z-index:70;opacity:0;transition:opacity .3s;pointer-events:none;max-width:90%;text-align:center}
 #toast.show{opacity:1}
 @media (min-width:700px){.seat{width:110px}.seat .av{width:64px;height:64px}.seat .hc{--card-w:38px}.seat.me .hc{--card-w:60px}.board .card{--card-w:54px}#controls{max-width:640px;margin:0 auto;width:100%}}
+.hostbar{margin:2px 10px 4px;padding:6px 10px;border-radius:10px;font-size:12px;line-height:1.35}.hostbar.ok{background:#2ec27e1a;color:#bdf3d6}.hostbar.ok span{color:#ffd28a}.hostbar.bad{background:#e639462a;color:#ffb3b9}

@@ -1,4 +1,5 @@
 import * as E from './engine.js';
+import { BROKERS, RelayHost, RelayClient, genHostKeys } from './relay.js';
 
 const $ = s => document.querySelector(s);
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -12,7 +13,11 @@ const STREET = { preflop: 'Префлоп', flop: 'Флоп', turn: 'Тёрн', 
 const SUIT = { s: '♠', h: '♥', d: '♦', c: '♣' };
 if (TEST) { window.__msgs = []; window.__V = () => V; window.__peer = () => peer; window.__send = d => send(d); }
 
-let code = (location.hash.match(/t=([A-Z0-9]{4,8})/i) || [])[1]?.toUpperCase();
+const hm = location.hash.match(/t=([A-Z0-9]{4,8})(?:\.([A-Za-z0-9_-]{16}))?/i) || [];
+let code = hm[1]?.toUpperCase(), fp = hm[2] || null; // fp — отпечаток ключа хоста для проверки подписи
+const QS = new URLSearchParams(location.search);
+const BROKER_LIST = TEST && QS.get('brokers') ? QS.get('brokers').split(',') : BROKERS;
+const P2P_OK = !!(window.RTCPeerConnection && window.Peer) && !QS.has('nop2p');
 let role = null, T = null, myPid = null, peer = null, hostConn = null, V = null, PV = null, clockOff = 0;
 const conns = {};
 let tab = 'hist', sheetOpen = false, raiseTo = null;
@@ -27,7 +32,7 @@ const hue = s => [...s].reduce((a, c) => a * 31 + c.charCodeAt(0) >>> 0, 7) % 36
 const avatar = name => { const h = hue(name || '?'); return `background:radial-gradient(circle at 35% 30%,hsl(${h} 70% 62%),hsl(${(h + 40) % 360} 65% 32%))`; };
 const initials = n => (n || '?').trim().split(/\s+/).map(w => w[0]).join('').slice(0, 2).toUpperCase();
 const peerOpts = { debug: 0, config: { iceServers: [{ urls: 'stun:stun.l.google.com:19302' }, { urls: 'stun:global.stun.twilio.com:3478' }] } };
-const shareLink = () => location.origin + location.pathname + '#t=' + code;
+const shareLink = () => location.origin + location.pathname + '#t=' + code + (role === 'host' && T?.keys ? '.' + T.keys.fp : fp ? '.' + fp : '');
 
 /* ---------- лендинг ---------- */
 function landing() {
@@ -102,7 +107,7 @@ function changed() {
   for (const [pid, c] of Object.entries(conns)) if (c.open) try { c.send({ t: 'view', v: E.view(T, pid, now) }); } catch (e) { }
   V = E.view(T, myPid, now); clockOff = 0; render();
 }
-function startHost() {
+async function startHost() {
   role = 'host';
   T = JSON.parse(localStorage['pkh_' + code]); myPid = T.adminPid;
   for (const p of Object.values(T.players)) p.connected = false;
@@ -110,28 +115,51 @@ function startHost() {
   if (T.hand && !T.hand.result && T.hand.toAct != null) T.hand.deadline = Date.now() + T.cfg.timer * 1000; // не штрафуем за время офлайна
   if (T.hand && T.hand.result) T.hand.result.until = Date.now() + 2500;
   if (TEST) { window.__T = () => T; window.__rig = decks => { T.rig = decks; }; window.__cfg = c => { Object.assign(T.cfg, c); changed(); }; }
-  showGame();
-  makeHostPeer();
+  showGame(); $('#hostBar').classList.remove('hidden');
+  if (!T.keys) { const k = await genHostKeys(); T.keys = k; persist(); }
+  history.replaceState(null, '', location.pathname + location.search + '#t=' + code + '.' + T.keys.fp);
+  relayH = new RelayHost({ code, keys: T.keys, brokers: BROKER_LIST });
+  relayH.on('connection', acceptConn).on('status', hostStatus);
+  relayH.start();
+  if (P2P_OK) makeHostPeer();
+  keepAwake();
+  setInterval(hostStatus, 2000);
   setInterval(() => { if (E.tick(T, Date.now())) changed(); }, 250);
   setInterval(() => { for (const c of Object.values(conns)) if (c.open) try { c.send({ t: 'ping' }); } catch (e) { } }, 3000);
   changed();
 }
+let relayH = null, p2pUp = false, wakeLock = null;
+function acceptConn(c) {
+  c.on('data', d => onHostMsg(c, d));
+  c.on('close', () => { if (c.pid && conns[c.pid] === c) { delete conns[c.pid]; T.players[c.pid].connected = false; changed(); } });
+}
+// Статус хоста: открыт ли стол и сколько игроков онлайн
+function hostStatus() {
+  const up = (relayH ? relayH.online() : 0) > 0 || p2pUp;
+  const n = Object.keys(conns).length;
+  setNet(up, up ? 'стол открыт' : 'нет связи…');
+  const b = $('#hostBar'); if (!b) return;
+  b.className = 'hostbar ' + (up ? 'ok' : 'bad');
+  b.innerHTML = up ? `🟢 <b>Стол открыт</b>, ${n ? `онлайн игроков: ${n}` : 'ждём игроков'} · <span>не сворачивайте приложение и не гасите экран — иначе стол встанет</span>`
+    : '🔴 <b>Нет связи с сервером</b> · переподключаюсь… Проверьте интернет';
+}
+async function keepAwake() {
+  try { if ('wakeLock' in navigator && document.visibilityState === 'visible') wakeLock = await navigator.wakeLock.request('screen'); } catch (e) { }
+}
+document.addEventListener('visibilitychange', () => { if (role === 'host' && document.visibilityState === 'visible') { keepAwake(); hostStatus(); } });
 function makeHostPeer() {
-  setNet(false, 'подключение…');
   peer = new Peer(PREFIX + code, peerOpts);
-  peer.on('open', () => setNet(true, 'хост ● онлайн'));
-  peer.on('connection', c => {
-    c.on('data', d => onHostMsg(c, d));
-    c.on('close', () => { if (c.pid && conns[c.pid] === c) { delete conns[c.pid]; T.players[c.pid].connected = false; changed(); } });
-  });
-  peer.on('disconnected', () => { setNet(false, 'переподключение…'); setTimeout(() => { if (!peer.destroyed) peer.reconnect(); }, 1500); });
+  peer.on('open', () => { p2pUp = true; hostStatus(); });
+  peer.on('connection', acceptConn);
+  peer.on('disconnected', () => { p2pUp = false; hostStatus(); setTimeout(() => { if (!peer.destroyed) peer.reconnect(); }, 1500); });
   peer.on('error', e => {
-    if (e.type === 'unavailable-id') { setNet(false, 'ожидание ID…'); peer.destroy(); setTimeout(makeHostPeer, 4000); }
-    else if (e.type === 'network' || e.type === 'server-error' || e.type === 'socket-error') { setNet(false, 'нет сети'); }
+    if (e.type === 'unavailable-id') { peer.destroy(); setTimeout(makeHostPeer, 4000); }
+    else if (e.type === 'network' || e.type === 'server-error' || e.type === 'socket-error') { p2pUp = false; hostStatus(); }
   });
 }
 function onHostMsg(c, d) {
   if (!d || typeof d !== 'object') return;
+  if (d.t === 'ping') return;
   if (d.t === 'hello') {
     let pid = d.pid, p = pid && T.players[pid];
     if (!p || p.token !== d.token || pid === T.adminPid) {
@@ -180,29 +208,31 @@ function handle(pid, d) {
 }
 
 /* ---------- клиент ---------- */
-let ident = {}, connTimer = null, gotView = false, kicked = false, lastMsg = 0;
-// сторож: если хост молчит дольше 9 с (пинг раз в 3 с) — переподключаемся
-setInterval(() => { if (role === 'client' && hostConn && hostConn.open && lastMsg && Date.now() - lastMsg > 9000) { lastMsg = 0; hostDown(); connect(); } }, 2000);
+// По умолчанию — ретранслятор MQTT (работает за любым NAT); если ни один брокер не доступен — P2P через PeerJS.
+let ident = {}, connTimer = null, gotView = false, kicked = false, lastMsg = 0, relayC = null;
+setInterval(() => {
+  if (role !== 'client' || !hostConn || !hostConn.open || !lastMsg || Date.now() - lastMsg <= 9000) return;
+  lastMsg = 0; hostDown(); if (hostConn.relay) hostConn.rehello(); else connect();
+}, 2000);
+setInterval(() => { if (role === 'client' && hostConn && hostConn.open) hostConn.send({ t: 'ping' }); }, 4000);
+function connStatus(text, kind) {
+  if (kicked) return;
+  setNet(false, kind === 'offline' ? 'хост офлайн' : kind === 'error' ? 'ошибка' : 'подключение…');
+  const home = `<button class="btn sec sm" onclick="location.hash='';location.reload()">На главную</button>`;
+  if (kind === 'error') return overlay(`<div><div style="font-size:40px">⚠️</div><b>${esc(text)}</b><p class="mut">Проверьте интернет или попробуйте другую сеть (Wi-Fi / мобильная).</p><button class="btn sm" id="retryBtn">Повторить</button> ${home}</div>`), $('#retryBtn').onclick = () => connect();
+  overlay(`<div><div class="spin"></div><b>${esc(text)}</b>${kind === 'offline' ? '<p class="mut">Игра сохранена у хоста. Как только он откроет стол (и не будет сворачивать приложение), вы подключитесь автоматически.</p>' : `<p class="mut">Стол ${esc(code)}</p>`}${home}</div>`);
+}
 function startClient(name) {
   role = 'client';
   ident = JSON.parse(localStorage['pkc_' + code] || '{}'); ident.name = name;
-  showGame(); overlay(`<div><div class="spin"></div>Подключаемся к столу ${esc(code)}…</div>`);
-  peer = new Peer(peerOpts);
-  peer.on('open', connect);
-  peer.on('error', e => { if (e.type === 'peer-unavailable') { hostDown(); retry(3000); } });
-  peer.on('disconnected', () => setTimeout(() => { if (!peer.destroyed) peer.reconnect(); }, 1500));
+  showGame(); connect();
 }
-function retry(ms) { if (kicked) return; clearTimeout(connTimer); connTimer = setTimeout(connect, ms); }
-function hostDown() { if (kicked) return;
-  setNet(false, 'хост офлайн');
-  overlay(`<div><div class="spin"></div><b>Хост не в сети</b><p class="mut">Игра сохранена у хоста и продолжится, как только он снова откроет стол. Переподключаемся автоматически…</p><button class="btn sec sm" onclick="location.hash='';location.reload()">На главную</button></div>`);
-}
-function connect() {
-  if (!peer.open) return retry(2000);
-  if (hostConn) try { hostConn.close(); } catch (e) { }
-  const c = hostConn = peer.connect(PREFIX + code, { reliable: true });
-  retry(8000); // если не открылось — пробуем снова
-  c.on('open', () => { clearTimeout(connTimer); lastMsg = Date.now(); c.send({ t: 'hello', pid: ident.pid, token: ident.token, name: ident.name }); setNet(true, '● онлайн'); });
+function hostDown() { connStatus(gotView ? 'Связь с хостом потеряна, переподключаюсь…' : 'Ищу стол…'); }
+function bindConn(c) {
+  hostConn = c;
+  c.on('open', () => { clearTimeout(connTimer); lastMsg = Date.now(); c.send({ t: 'hello', pid: ident.pid, token: ident.token, name: ident.name }); setNet(true, c.relay ? '● онлайн' : '● онлайн (P2P)'); connStatus('Вхожу за стол…'); });
+  c.on('status', (t, k) => { if (!c.open) connStatus(t, k); });
+  c.on('lost', () => hostDown());
   c.on('data', d => {
     lastMsg = Date.now();
     if (d.t === 'ping') return;
@@ -210,9 +240,31 @@ function connect() {
     if (d.t === 'welcome') { ident.pid = d.pid; ident.token = d.token; myPid = d.pid; localStorage['pkc_' + code] = JSON.stringify(ident); }
     else if (d.t === 'view') { if (kicked) return; gotView = true; overlay(null); V = d.v; clockOff = V.now - Date.now(); render(); }
     else if (d.t === 'err') toast(d.msg);
-    else if (d.t === 'kicked') { kicked = true; clearTimeout(connTimer); overlay(`<div><b>Хост убрал вас со стола</b><p class="mut">Ваш баланс сохранён у хоста.</p><button class="btn sec sm" onclick="location.hash='';location.reload()">На главную</button></div>`); }
+    else if (d.t === 'kicked') { kicked = true; clearTimeout(connTimer); relayC?.close(); overlay(`<div><b>Хост убрал вас со стола</b><p class="mut">Ваш баланс сохранён у хоста.</p><button class="btn sec sm" onclick="location.hash='';location.reload()">На главную</button></div>`); }
   });
-  c.on('close', () => { if (c !== hostConn) return; hostDown(); retry(2000); });
+  c.on('close', () => { if (c !== hostConn || kicked) return; hostDown(); clearTimeout(connTimer); connTimer = setTimeout(connect, 2000); });
+}
+async function connect() {
+  if (kicked) return;
+  clearTimeout(connTimer);
+  if (relayC) relayC.close();
+  if (hostConn && !hostConn.relay) try { hostConn.close(); } catch (e) { }
+  const r = relayC = new RelayClient({ code, fp, brokers: BROKER_LIST });
+  bindConn(r);
+  if (await r.start()) return;
+  if (r !== relayC) return;
+  if (!P2P_OK) return connStatus('Не удалось подключиться к серверу', 'error');
+  connStatus('Сервер недоступен, пробую прямое соединение…');
+  p2pConnect();
+}
+function p2pConnect() {
+  if (!peer || peer.destroyed) { peer = new Peer(peerOpts); peer.on('error', e => { if (e.type === 'peer-unavailable') connStatus('Хост не в сети — попросите его открыть стол', 'offline'); }); }
+  const go = () => {
+    const c = peer.connect(PREFIX + code, { reliable: true });
+    bindConn(c);
+    connTimer = setTimeout(() => { if (!c.open) { try { c.close(); } catch (e) { } connStatus('Не удалось подключиться к столу', 'error'); } }, 10000);
+  };
+  if (peer.open) go(); else { peer.once('open', go); connTimer = setTimeout(() => { if (!peer.open) connStatus('Не удалось подключиться к серверу', 'error'); }, 10000); }
 }
 function send(d) {
   if (role === 'host') { const e = handle(myPid, d); if (e) toast(e); changed(); }

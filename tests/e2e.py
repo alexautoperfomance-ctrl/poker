@@ -2,7 +2,9 @@
 import json, sys, time, subprocess, os
 from playwright.sync_api import sync_playwright
 
-URL = os.environ.get('URL', 'http://localhost:8765/')
+URL = os.environ.get('URL', 'http://localhost:8931/')
+# Принудительно ретранслятор: WebRTC удалён из страниц, PeerJS выключен, брокер — локальный MQTT (или BROKERS)
+Q = '?test=1&nop2p=1&brokers=' + os.environ.get('BROKERS', 'ws://localhost:9883')
 SHOTS = '/workspace/poker/shots'
 NAMES = ['Алексей', 'Миша', 'Оля', 'Дима']
 errors = []
@@ -13,25 +15,27 @@ def ok(c, m):
 with sync_playwright() as p:
     br = p.chromium.launch(args=['--disable-features=WebRtcHideLocalIpsWithMdns'])
     pages = []
-    def mk():
+    def mk(listen=True):
         ctx = br.new_context(viewport={'width': 440, 'height': 956}, device_scale_factor=2, is_mobile=True, has_touch=True)
+        ctx.add_init_script('delete window.RTCPeerConnection; delete window.webkitRTCPeerConnection;')
         pg = ctx.new_page()
-        pg.on('console', lambda m, pg=pg: m.type == 'error' and errors.append('console: ' + m.text))
+        if listen: pg.on('console', lambda m, pg=pg: m.type == 'error' and errors.append('console: ' + m.text))
         pg.on('pageerror', lambda e: errors.append('pageerror: ' + str(e)))
         return pg
     host = mk(); pages.append(host)
-    host.goto(URL + '?test=1')
+    host.goto(URL + Q)
     host.fill('#nick', NAMES[0]); host.fill('#pin', '4321'); host.click('#createBtn')
-    host.wait_for_selector('#net:has-text("онлайн")', timeout=20000)
-    code = host.evaluate('__T().code'); print('code', code)
-    host.click('[data-sit="0"]')
+    host.wait_for_selector('#hostBar.ok:has-text("ждём игроков")', timeout=20000)
+    code = host.evaluate('__T().code'); link = host.evaluate('location.hash'); print('code', code, link)
+    ok(len(link) == len('#t=') + len(code) + 17, 'в ссылке есть отпечаток ключа хоста')
+    host.click('[data-sit="0"]'); host.evaluate('__cfg({timer: 10})')
     # админ заранее добавляет Мишу с фишками
     host.click('#menuBtn'); host.click('[data-tab="admin"]')
     ok(host.inner_text('#bank') == '∞', 'банк хоста показан как ∞')
     host.fill('#invName', 'Миша'); host.fill('#invChips', '2000'); host.click('#invBtn'); host.click('#sheetClose')
     for i in (1, 2, 3):
         pg = mk(); pages.append(pg)
-        pg.goto(URL + '?test=1#t=' + code)
+        pg.goto(URL + Q + link)
         pg.fill('#nick', NAMES[i]); pg.click('#joinBtn')
         pg.wait_for_function('window.__V && __V()', timeout=30000)
         if i == 1:
@@ -129,7 +133,7 @@ with sync_playwright() as p:
                rig=[{'hole': {'0': ['2h', '3d'], '1': ['As', 'Ad'], '2': ['Ks', 'Kd'], '3': ['7s', '8c']},
                      'board': ['Ac', '9d', '4h', 'Kh', '9s', '5h', '2c', '3c', 'Jd', 'Td']}])
     ok(hn == 7 and T('__T().hand.bomb && __T().hand.street') == 'flop', 'бомб-пот: сразу флоп')
-    ok(pages[1].evaluate('!document.querySelector("#bombBanner").classList.contains("hidden")'), 'баннер БОМБ-ПОТ виден')
+    pages[1].wait_for_function('!document.querySelector("#bombBanner").classList.contains("hidden")', timeout=10000); ok(True, 'баннер БОМБ-ПОТ виден')
     h = play(passive, shot_at=('flop', 'bomb-pot-440.png', 2))
     st = T('Object.fromEntries(__T().seats.map((pid,s)=>[s,pid&&__T().players[pid].stack]))')
     ok(st['1'] == 2040 and st['2'] == 2040 and st['0'] == 1960 and st['3'] == 1960, f'бомб-пот: банк 160 (анте 4×40) поделён по доскам {st}')
@@ -153,15 +157,18 @@ with sync_playwright() as p:
     ok(pages[1].evaluate('__V().untilBomb') >= 1, 'счётчик до бомб-пота')
 
     # перезапуск хоста: состояние из localStorage, клиенты переподключаются
-    T('__T().started=false'); host.wait_for_function('!__T().hand', timeout=20000)
+    T('__T().started=false')
+    try: host.wait_for_function('!__T().hand', timeout=60000)
+    except Exception:
+        print('STUCK', T('JSON.stringify({h:__T().hand&&{to:__T().hand.toAct,dl:__T().hand.deadline-Date.now(),st:__T().hand.street,res:!!__T().hand.result,log:__T().hand.log},p:Object.values(__T().players).map(p=>[p.name,p.seat,p.sitOut,p.connected])})')); raise
     before = T('Object.values(__T().players).map(p=>p.name+":"+p.stack).sort()')
     hctx = host.context; host.close(); time.sleep(2)
     host = hctx.new_page(); host.on('pageerror', lambda e: errors.append('pageerror: ' + str(e)))
-    host.goto(URL + '?test=1#t=' + code)
+    host.goto(URL + Q + link)
     host.fill('#pinIn', '1111'); host.click('#pinBtn'); time.sleep(1.2)
     ok(host.query_selector('#pinIn') is not None, 'неверный PIN не пускает в хост')
     host.fill('#pinIn', '4321'); host.click('#pinBtn')
-    host.wait_for_selector('#net:has-text("онлайн")', timeout=30000)
+    host.wait_for_selector('#hostBar.ok', timeout=30000)
     T = lambda js: host.evaluate(js)
     pages[3].wait_for_function('__V() && !document.querySelector("#overlay:not(.hidden)")', timeout=40000)
     host.wait_for_function('Object.values(__T().players).filter(p=>p.connected).length === 4', timeout=40000)
@@ -175,7 +182,20 @@ with sync_playwright() as p:
     ok(T(f'__T().players["{pid3}"].status') == 'kicked' and T('__T().seats[3]') is None, 'игрок выгнан и не может вернуться')
 
     host.click('#menuBtn'); time.sleep(0.5); host.screenshot(path=f'{SHOTS}/history-440.png'); host.click('#sheetClose')
+    # статус для друга, когда хост не в сети
+    hctx.close(); time.sleep(1)
+    pages[1].wait_for_selector('#overlay:has-text("Хост не в сети — попросите его открыть стол")', timeout=30000)
+    ok(True, 'друг видит «Хост не в сети — попросите его открыть стол»')
+    pg = mk(False); pg.goto(URL + '?test=1&nop2p=1&brokers=ws://localhost:1' + link); pg.fill('#nick', 'Тест'); pg.click('#joinBtn')
+    pg.wait_for_selector('#overlay:has-text("Не удалось подключиться к серверу") #retryBtn', timeout=30000)
+    ok(True, 'брокер недоступен → ошибка с кнопкой «Повторить»')
     br.close()
+    # снифф брокера: ни одной карты открытым текстом
+    import re
+    wire = open(os.environ.get('WIRE', '/tmp/wire.log'), encoding='utf-8', errors='replace').read()
+    n_e = wire.count('"t":"e"'); cards = re.findall(r'"[2-9TJQKA][shdc]"', wire)
+    names = [n for n in NAMES if n in wire]
+    ok(n_e > 100 and not cards and not names and 'hole' not in wire, f'трафик брокера: {n_e} шифр. сообщений, карт открытым текстом: {len(cards)}, ников: {names}')
 
 errs = [e for e in errors if not e.startswith(('PASS',))]
 print('ERRORS:', errs if errs else 'none')
